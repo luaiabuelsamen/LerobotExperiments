@@ -1,0 +1,14 @@
+torch>=2.0.0
+torchvision
+numpy
+pandas
+pyarrow
+opencv-python
+mujoco>=3.0.0
+dm-control
+scipy
+matplotlib
+tqdm
+pyyaml
+pillow
+ffmpeg-python
