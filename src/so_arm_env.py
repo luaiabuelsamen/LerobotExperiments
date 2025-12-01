@@ -9,14 +9,14 @@ import numpy as np
 
 import gymnasium as gym
 
-# Import the standalone dataset recorder
+# Try to import dataset recorder, set flag if available
 try:
-    from lerobot_dataset import LeRobotDatasetRecorder, create_dataset_recorder
+    from .lerobot_dataset import LeRobotDatasetRecorder, create_dataset_recorder
     HAS_DATASET_RECORDER = True
 except ImportError:
     HAS_DATASET_RECORDER = False
     print("Warning: lerobot_dataset.py not found. Dataset recording disabled.")
-
+    
 
 class SoArm100Env(gym.Env):
     """Env. Gymnasium que encapsula a descrição MJCF do SO-ARM100."""
@@ -32,7 +32,7 @@ class SoArm100Env(gym.Env):
 
     def __init__(
         self,
-        model_path: str | os.PathLike | None = "scene.xml",
+        model_path: str | os.PathLike | None = "env/scene.xml",
         frame_skip: int = 10,
         render_mode: str | None = "human",
         camera_mode: str = "third_person",  # "third_person" or "first_person"
@@ -284,20 +284,18 @@ class SoArm100Env(gym.Env):
         """Start recording episode data and video."""
         self.recording = True
         self.recorded_data = []
-        self.video_recording = True
+        # Disable video recording since dataset recording handles videos
+        self.video_recording = False
         self.recorded_frames = []
-        print("Recording started - capturing data and video frames")
+        print("Recording started - capturing data (video handled by dataset recording)")
 
     def stop_recording(self):
-        """Stop recording episode data and save video."""
+        """Stop recording episode data."""
         self.recording = False
         self.video_recording = False
         
-        # Save video if frames were recorded
-        if self.recorded_frames:
-            self._save_video()
-        
-        print(f"Recording stopped. Recorded {len(self.recorded_data)} data points and {len(self.recorded_frames)} video frames")
+        # Don't save video since dataset recording handles videos
+        print(f"Recording stopped. Recorded {len(self.recorded_data)} data points")
 
     def _save_video(self, filename: str = "demo_recording.mp4", fps: int = 30):
         """Save recorded frames as a video file."""

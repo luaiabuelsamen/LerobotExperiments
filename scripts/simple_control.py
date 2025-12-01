@@ -17,6 +17,7 @@ import tty
 
 # Import the Mujoco environment
 import src.so_arm_env as so_arm_env
+from src.so_arm_env import HAS_DATASET_RECORDER
 
 
 def get_key():
@@ -36,10 +37,8 @@ def keyboard_listener(env):
     print("Keyboard controls:")
     print("  R - Reset episode")
     print("  Z - Randomize block position")
-    print("  S - Start video recording (MP4)")
-    print("  X - Stop video recording")
-    print("  D - Start dataset recording (LeRobot format)")
-    print("  F - Finish/save dataset episode")
+    print("  S - Start recording (video + dataset)")
+    print("  F - Finish/save recording")
     print("  Q - Quit")
     
     while True:
@@ -52,16 +51,16 @@ def keyboard_listener(env):
                 print("Randomizing block position...")
                 env._randomize_environment()
             elif key == 's':
+                # Start both video and dataset recording
                 if not env.recording:
                     env.start_recording()
-            elif key == 'x':
-                if env.recording:
-                    env.stop_recording()
-            elif key == 'd':
-                if not env.dataset_recording:
+                if HAS_DATASET_RECORDER and not env.dataset_recording:
                     env.start_dataset_recording()
             elif key == 'f':
-                if env.dataset_recording:
+                # Stop both video and dataset recording
+                if env.recording:
+                    env.stop_recording()
+                if HAS_DATASET_RECORDER and env.dataset_recording:
                     env.save_dataset_episode()
             elif key == 'q':
                 print("Quitting...")
@@ -74,7 +73,7 @@ def keyboard_listener(env):
 class SO100LeaderReader:
     """Direct serial communication with SO100 leader arm Feetech motors."""
     
-    def __init__(self, port='/dev/ttyACM1', baudrate=1000000, calibration_file="calibration.json"):
+    def __init__(self, port='/dev/ttyACM1', baudrate=1000000, calibration_file="configs/calibration.json"):
         self.port = port
         self.baudrate = baudrate
         self.serial = None

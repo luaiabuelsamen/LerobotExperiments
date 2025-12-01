@@ -42,7 +42,7 @@ assets/
 models/
 
 # Data and models (large files)
-data/
+recordings/
 
 # MuJoCo
 MUJOCO_LOG.TXT

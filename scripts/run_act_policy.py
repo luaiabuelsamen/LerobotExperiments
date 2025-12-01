@@ -169,21 +169,36 @@ class PolicyRunner:
         
         return action
     
-    def reset(self):
+    def reset(self, initial_position=None):
         """Reset the environment and action buffer."""
         mujoco.mj_resetData(self.mj_model, self.mj_data)
+        
+        # Set initial joint positions if provided
+        if initial_position is not None:
+            for i, joint_idx in enumerate(self.joint_indices):
+                if i < len(initial_position):
+                    qpos_idx = self.mj_model.jnt_qposadr[joint_idx]
+                    self.mj_data.qpos[qpos_idx] = initial_position[i]
+            # Forward simulation to update the state
+            mujoco.mj_forward(self.mj_model, self.mj_data)
+        
         self.action_buffer = None
         self.buffer_idx = 0
     
-    def run_episode(self, max_steps: int = 1000, render: bool = True):
+    def run_episode(self, max_steps: int = 1000, render: bool = True, initial_position=None):
         """
         Run one episode with the policy.
         
         Args:
             max_steps: Maximum number of steps
             render: Whether to render with viewer
+            initial_position: Initial joint positions to start from
         """
-        self.reset()
+        # Default initial position for ACT policy
+        if initial_position is None:
+            initial_position = [0.00397189, -1.6223897, 1.6252737, 1.521133, -1.5169878, -0.01448443]
+        
+        self.reset(initial_position)
         
         if render:
             with mujoco.viewer.launch_passive(self.mj_model, self.mj_data) as v:
@@ -229,7 +244,9 @@ class PolicyRunner:
     
     def run_continuous(self):
         """Run policy continuously with interactive viewer."""
-        self.reset()
+        # Default initial position for ACT policy
+        initial_position = [0.00397189, -1.6223897, 1.6252737, 1.521133, -1.5169878, -0.01448443]
+        self.reset(initial_position)
         
         def controller(model, data):
             """Controller callback for viewer."""
