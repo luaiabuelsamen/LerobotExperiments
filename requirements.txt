@@ -12,3 +12,9 @@ tqdm
 pyyaml
 pillow
 ffmpeg-python
+
+# Additional dependencies for RL
+tensorboard
+gymnasium
+stable-baselines3
+wandb

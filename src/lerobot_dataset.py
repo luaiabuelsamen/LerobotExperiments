@@ -262,6 +262,10 @@ class LeRobotDatasetRecorder:
         self.video_keys = [k for k, v in features.items() if v.get("dtype") == "video"]
         self.image_keys = [k for k, v in features.items() if v.get("dtype") == "image"]
         self.camera_keys = self.video_keys + self.image_keys
+
+        # Track chunk/file indices so saved videos follow LeRobot naming (chunk/file)
+        self.video_chunk_indices = {key: 0 for key in self.video_keys}
+        self.video_file_indices = {key: 0 for key in self.video_keys}
         
     @classmethod
     def create(
@@ -350,10 +354,40 @@ class LeRobotDatasetRecorder:
             tasks_df = pd.read_parquet(tasks_path)
             recorder.tasks = {row.name: row.task_index for _, row in tasks_df.iterrows()}
         
-        # Load existing stats
-        stats_path = root / STATS_PATH
-        if stats_path.exists():
-            recorder.all_episode_stats = [load_json(stats_path)]
+        # Load existing episodes metadata
+        episodes_path = root / EPISODES_PATH.format(chunk_index=0, file_index=0)
+        if episodes_path.exists() and HAS_PANDAS:
+            try:
+                episodes_df = pd.read_parquet(episodes_path)
+                # Convert back to list of dicts, excluding stats columns
+                base_cols = ['episode_index', 'tasks', 'length', 'data/chunk_index', 'data/file_index',
+                            'dataset_from_index', 'dataset_to_index']
+                # Add video columns if they exist
+                video_cols = [col for col in episodes_df.columns if col.startswith('videos/')]
+                base_cols.extend(video_cols)
+                
+                for _, row in episodes_df.iterrows():
+                    episode_meta = {col: row[col] for col in base_cols if col in episodes_df.columns}
+                    recorder.episodes_metadata.append(episode_meta)
+
+                # Restore video chunk/file counters so subsequent saves continue sequentially
+                for video_key in recorder.video_keys:
+                    chunk_col = f"videos/{video_key}/chunk_index"
+                    file_col = f"videos/{video_key}/file_index"
+                    if chunk_col in episodes_df.columns and file_col in episodes_df.columns:
+                        last_row = episodes_df[[chunk_col, file_col]].dropna().tail(1)
+                        if not last_row.empty:
+                            recorder.video_chunk_indices[video_key] = int(last_row[chunk_col].iloc[0])
+                            recorder.video_file_indices[video_key] = int(last_row[file_col].iloc[0]) + 1
+                            if recorder.video_file_indices[video_key] >= DEFAULT_CHUNK_SIZE:
+                                recorder.video_file_indices[video_key] = 0
+                                recorder.video_chunk_indices[video_key] += 1
+            except Exception as e:
+                print(f"Warning: Could not load episodes metadata: {e}")
+        
+        # Load existing stats - just keep empty list for now, will accumulate new ones
+        # The all_episode_stats is used for aggregation, not per-episode tracking
+        recorder.all_episode_stats = []
         
         return recorder
     
@@ -406,14 +440,17 @@ class LeRobotDatasetRecorder:
     def save_episode(self) -> int:
         """Save the current episode to disk."""
         if not HAS_PANDAS:
-            raise RuntimeError("pandas is required to save episodes")
+            print("Error: pandas is required to save episodes")
+            return -1
         
         episode_index = self.current_episode_index
         episode_length = self.episode_frame_count
         
         if episode_length == 0:
-            print("Warning: Empty episode, skipping save")
+            print("Warning: Empty episode (no frames recorded), skipping save")
             return -1
+        
+        print(f"Saving episode {episode_index} with {episode_length} frames...")
         
         # Create data arrays
         actions = np.stack(self.episode_buffer["action"])
@@ -522,38 +559,42 @@ class LeRobotDatasetRecorder:
                     img_bgr = img
                 cv2.imwrite(str(img_path), img_bgr)
         
-        # Encode video
-        video_path = self.root / VIDEO_PATH.format(
-            video_key=video_key, chunk_index=0, file_index=0
-        )
-        
-        # For simplicity, we create one video per episode and concatenate later
-        # In production, you'd concatenate to existing video file
-        temp_video = temp_dir.parent / f"episode-{episode_index:06d}.mp4"
-        
-        if encode_video_ffmpeg(temp_dir, temp_video, self.fps):
-            # Move/concatenate to final location
-            video_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            if video_path.exists():
-                # Concatenate with existing video
-                self._concatenate_videos([video_path, temp_video], video_path)
-                temp_video.unlink()
-            else:
-                shutil.move(str(temp_video), str(video_path))
+        chunk_index = self.video_chunk_indices.get(video_key, 0)
+        file_index = self.video_file_indices.get(video_key, episode_index)
+        video_rel_path = VIDEO_PATH.format(video_key=video_key, chunk_index=chunk_index, file_index=file_index)
+        episode_video_path = self.root / video_rel_path
+        episode_video_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if encode_video_ffmpeg(temp_dir, episode_video_path, self.fps):
+            print(f"Saved video: {episode_video_path}")
+            self._advance_video_index(video_key)
+        else:
+            print(f"Warning: Failed to encode video for episode {episode_index}")
         
         # Clean up temp images
-        shutil.rmtree(temp_dir)
+        try:
+            shutil.rmtree(temp_dir)
+        except:
+            pass
         
         # Get video duration
         video_duration = len(images) / self.fps
         
         return {
-            f"videos/{video_key}/chunk_index": 0,
-            f"videos/{video_key}/file_index": 0,
-            f"videos/{video_key}/from_timestamp": 0.0,  # Simplified
+            f"videos/{video_key}/chunk_index": chunk_index,
+            f"videos/{video_key}/file_index": file_index,
+            f"videos/{video_key}/from_timestamp": 0.0,
             f"videos/{video_key}/to_timestamp": video_duration,
         }
+
+    def _advance_video_index(self, video_key: str) -> None:
+        """Increment file counters, rolling over to new chunks as needed."""
+        current = self.video_file_indices.get(video_key, 0) + 1
+        if current >= DEFAULT_CHUNK_SIZE:
+            self.video_file_indices[video_key] = 0
+            self.video_chunk_indices[video_key] = self.video_chunk_indices.get(video_key, 0) + 1
+        else:
+            self.video_file_indices[video_key] = current
     
     def _concatenate_videos(self, input_paths: List[Path], output_path: Path):
         """Concatenate multiple videos using ffmpeg."""
@@ -587,20 +628,33 @@ class LeRobotDatasetRecorder:
         if not HAS_PANDAS or not self.episodes_metadata:
             return
         
-        df = pd.DataFrame(self.episodes_metadata)
-        
-        # Add stats columns (flattened)
-        for i, ep_stats in enumerate(self.all_episode_stats):
-            for feat_key, stats in ep_stats.items():
-                for stat_name, stat_val in stats.items():
-                    col_name = f"stats/{feat_key}/{stat_name}"
-                    if col_name not in df.columns:
-                        df[col_name] = None
-                    df.at[i, col_name] = stat_val.tolist() if isinstance(stat_val, np.ndarray) else stat_val
-        
-        episodes_path = self.root / EPISODES_PATH.format(chunk_index=0, file_index=0)
-        episodes_path.parent.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(episodes_path, index=False)
+        try:
+            df = pd.DataFrame(self.episodes_metadata)
+            
+            # Add stats columns (flattened) - only if we have stats
+            if self.all_episode_stats and len(self.all_episode_stats) == len(self.episodes_metadata):
+                for i, ep_stats in enumerate(self.all_episode_stats):
+                    if ep_stats:
+                        for feat_key, stats in ep_stats.items():
+                            for stat_name, stat_val in stats.items():
+                                col_name = f"stats/{feat_key}/{stat_name}"
+                                if col_name not in df.columns:
+                                    df[col_name] = None
+                                df.at[i, col_name] = stat_val.tolist() if isinstance(stat_val, np.ndarray) else stat_val
+            
+            episodes_path = self.root / EPISODES_PATH.format(chunk_index=0, file_index=0)
+            episodes_path.parent.mkdir(parents=True, exist_ok=True)
+            df.to_parquet(episodes_path, index=False)
+        except Exception as e:
+            print(f"Warning: Could not save episodes metadata: {e}")
+            # Save without stats as fallback
+            try:
+                df = pd.DataFrame(self.episodes_metadata)
+                episodes_path = self.root / EPISODES_PATH.format(chunk_index=0, file_index=0)
+                episodes_path.parent.mkdir(parents=True, exist_ok=True)
+                df.to_parquet(episodes_path, index=False)
+            except Exception as e2:
+                print(f"Error: Could not save episodes metadata even without stats: {e2}")
     
     def _save_tasks(self):
         """Save tasks to parquet."""

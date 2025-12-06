@@ -3,8 +3,8 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Set PYTHONPATH to include the project root so src/ modules can be imported
-export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
+# Make project modules (src/ and lerobot/src) available for all entrypoints
+export PYTHONPATH="$SCRIPT_DIR:$SCRIPT_DIR/lerobot/src:$PYTHONPATH"
 
 case "$1" in
     "calibrate")

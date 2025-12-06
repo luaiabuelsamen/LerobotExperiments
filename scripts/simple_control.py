@@ -17,7 +17,9 @@ import tty
 
 # Import the Mujoco environment
 import src.so_arm_env as so_arm_env
-from src.so_arm_env import HAS_DATASET_RECORDER
+
+# Global lock for thread-safe mujoco operations
+env_lock = threading.Lock()
 
 
 def get_key():
@@ -32,41 +34,117 @@ def get_key():
     return ch
 
 
+def randomize_block_position(env):
+    """Randomize block position anywhere on the table, avoiding box and robot areas."""
+    # Import mujoco from the environment
+    import mujoco
+    
+    # Table bounds (based on scene.xml: table size 0.3x0.4 at pos 0, -0.15, 0.07)
+    table_x_min, table_x_max = -0.28, 0.28  # Leave some margin from edges
+    table_y_min, table_y_max = -0.53, 0.23  # Leave some margin from edges
+    table_z = 0.115  # Height on table surface (table top at 0.09 + block height)
+    
+    # Box bounds to avoid (box at pos -0.1, -0.35, with size 0.06x0.06)
+    box_x_min, box_x_max = -0.18, -0.02  # Box area with safety margin
+    box_y_min, box_y_max = -0.43, -0.27  # Box area with safety margin
+    
+    # Robot base area to avoid (around origin)
+    robot_x_min, robot_x_max = -0.12, 0.12  # Robot base area with margin
+    robot_y_min, robot_y_max = -0.05, 0.15  # Robot base area with margin
+    
+    max_attempts = 50
+    for attempt in range(max_attempts):
+        # Generate random position on table
+        block_x = np.random.uniform(table_x_min, table_x_max)
+        block_y = np.random.uniform(table_y_min, table_y_max)
+        
+        # Check if position conflicts with box area
+        in_box_area = (box_x_min <= block_x <= box_x_max and 
+                       box_y_min <= block_y <= box_y_max)
+        
+        # Check if position conflicts with robot area
+        in_robot_area = (robot_x_min <= block_x <= robot_x_max and 
+                         robot_y_min <= block_y <= robot_y_max)
+        
+        # If no conflicts, use this position
+        if not in_box_area and not in_robot_area:
+            # THREAD SAFE: Lock before modifying mujoco state
+            with env_lock:
+                # Set block position (free joint body)
+                block_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_BODY, "block")
+                if block_id >= 0:
+                    # For free joint bodies, qpos has 7 values: 3 position + 4 quaternion
+                    qpos_start = env.model.jnt_qposadr[mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_JOINT, "block")]
+                    env.data.qpos[qpos_start:qpos_start+3] = [block_x, block_y, table_z]
+                    env.data.qpos[qpos_start+3:qpos_start+7] = [1, 0, 0, 0]  # quaternion identity
+                    
+                    # Reset velocities
+                    qvel_start = env.model.jnt_dofadr[mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_JOINT, "block")]
+                    env.data.qvel[qvel_start:qvel_start+6] = 0.0
+                
+                # Forward kinematics to update derived quantities
+                mujoco.mj_forward(env.model, env.data)
+            
+            print(f"Block randomized to position: ({block_x:.3f}, {block_y:.3f}, {table_z:.3f})")
+            return
+    
+    print(f"Warning: Could not find valid random position after {max_attempts} attempts. Using default position.")
+    # Fallback to a safe default position
+    block_x, block_y = 0.15, -0.25
+    block_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_BODY, "block")
+    if block_id >= 0:
+        qpos_start = env.model.jnt_qposadr[mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_JOINT, "block")]
+        env.data.qpos[qpos_start:qpos_start+3] = [block_x, block_y, table_z]
+        env.data.qpos[qpos_start+3:qpos_start+7] = [1, 0, 0, 0]
+        qvel_start = env.model.jnt_dofadr[mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_JOINT, "block")]
+        env.data.qvel[qvel_start:qvel_start+6] = 0.0
+    mujoco.mj_forward(env.model, env.data)
+
+
 def keyboard_listener(env):
     """Listen for keyboard input in a separate thread."""
-    print("Keyboard controls:")
-    print("  R - Reset episode")
-    print("  Z - Randomize block position")
-    print("  S - Start recording (video + dataset)")
-    print("  F - Finish/save recording")
-    print("  Q - Quit")
+    print("\n" + "="*60)
+    print("KEYBOARD CONTROLS:")
+    print("="*60)
+    print("  R - Reset episode (reset robot to home position)")
+    print("  Z - Randomize block position on table")
+    print("  S - Start recording (press when ready to demonstrate)")
+    print("  F - Finish/save recording (press when task complete)")
+    print("  Q - Quit program")
+    print("="*60)
+    print("\nTIP: Press 'Z' to randomize block, 'R' to reset robot,")
+    print("     then 'S' to start recording your demonstration.")
+    print("     Complete the task, then press 'F' to save.\n")
     
     while True:
         try:
             key = get_key().lower()
             if key == 'r':
-                print("Resetting episode...")
-                env.reset()
+                print("\n[RESET] Resetting robot to home position...")
+                with env_lock:
+                    obs, info = env.reset()
+                print("[RESET] Robot reset complete.\n")
             elif key == 'z':
-                print("Randomizing block position...")
-                env._randomize_environment()
+                print("\n[RANDOMIZE] Randomizing block position...")
+                randomize_block_position(env)
             elif key == 's':
                 # Start both video and dataset recording
-                if not env.recording:
-                    env.start_recording()
-                if HAS_DATASET_RECORDER and not env.dataset_recording:
+                if env.dataset_recording:
+                    print("\n[WARNING] Already recording! Press 'F' to finish current episode first.\n")
+                else:
                     env.start_dataset_recording()
             elif key == 'f':
                 # Stop both video and dataset recording
-                if env.recording:
-                    env.stop_recording()
-                if HAS_DATASET_RECORDER and env.dataset_recording:
+                if env.dataset_recording:
                     env.save_dataset_episode()
             elif key == 'q':
-                print("Quitting...")
+                print("\n[QUIT] Shutting down...")
+                if env.dataset_recording:
+                    print("[QUIT] Saving current recording before exit...")
+                    env.save_dataset_episode()
                 break
         except Exception as e:
-            print(f"Keyboard error: {e}")
+            print(f"\n[ERROR] Keyboard error: {e}\n")
             break
 
 
@@ -263,23 +341,52 @@ class SO100LeaderReader:
         
 
 def main():
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="SO100 Leader Arm Control for Mujoco")
+    parser.add_argument("--new", action="store_true", help="Create new dataset folder instead of continuing existing")
+    parser.add_argument(
+        "--dataset-path",
+        type=str,
+        default=None,
+        help="Explicit recordings path (default: auto-continue last dataset in ./recordings)",
+    )
+    args = parser.parse_args()
+    
+    print("="*60)
     print("SO100 Leader Arm Control for Mujoco SO-ARM100")
+    print("QUICK DATA COLLECTION MODE")
+    if args.new:
+        print("[NEW DATASET MODE - Will create new folder]")
+    if args.dataset_path:
+        print(f"[DATASET PATH] {args.dataset_path}")
+    print("="*60)
     
     # Create leader arm reader and Mujoco environment
     leader_arm = SO100LeaderReader(port='/dev/ttyACM1')
     
     try:
-        env = so_arm_env.SoArm100Env(render_mode="human", camera_mode="first_person")
+        env = so_arm_env.SoArm100Env(
+            render_mode="human",
+            camera_mode="first_person",
+            force_new_dataset=args.new,
+            dataset_path=args.dataset_path,
+        )
     except Exception as e:
         if "GLFW" in str(e) or "DISPLAY" in str(e):
             print("No display available, using headless mode")
-            env = so_arm_env.SoArm100Env(render_mode=None, camera_mode="first_person")
+            env = so_arm_env.SoArm100Env(
+                render_mode=None,
+                camera_mode="first_person",
+                force_new_dataset=args.new,
+                dataset_path=args.dataset_path,
+            )
         else:
             raise
     
     try:
         # Connect to leader arm
-        print("Connecting to leader arm...")
+        print("\nConnecting to leader arm...")
         if not leader_arm.connect():
             print("Failed to connect to leader arm. Using simulated control instead.")
             # Fall back to simulated control
@@ -291,7 +398,6 @@ def main():
             return
         
         print("Connected! Move the leader arm to control the Mujoco robot.")
-        print("Press Ctrl+C to exit.")
         
         # Start keyboard listener thread
         keyboard_thread = threading.Thread(target=keyboard_listener, args=(env,), daemon=True)
@@ -301,6 +407,7 @@ def main():
         obs, info = env.reset()
         
         # Control loop
+        print("\nReady! Waiting for your commands...\n")
         while True:
             # Read leader arm action
             leader_action = leader_arm.get_action()
@@ -308,23 +415,29 @@ def main():
             # Apply calibration to get Mujoco-compatible positions
             action = leader_arm.apply_calibration(leader_action)
             
-            # Step the Mujoco environment with the calibrated action
-            obs, reward, terminated, truncated, info = env.step(action)
+            # Step the Mujoco environment with the calibrated action (thread-safe)
+            with env_lock:
+                obs, reward, terminated, truncated, info = env.step(action)
             
-            # Print action for debugging
-            # print(f"Action: after {action} before {leader_action}")
             # Small delay to control loop rate
             time.sleep(0.01)
             
             if terminated or truncated:
-                print("Episode ended, resetting...")
-                obs, info = env.reset()
+                print("\n[INFO] Episode ended, resetting...\n")
+                with env_lock:
+                    obs, info = env.reset()
                 
     except KeyboardInterrupt:
-        print("\nStopping control...")
+        print("\n\n[EXIT] Stopping control...")
+        if env.dataset_recording:
+            print("[EXIT] Saving current recording before exit...")
+            try:
+                env.save_dataset_episode()
+            except:
+                pass
     
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"\n[ERROR] {e}")
     
     finally:
         # Clean up

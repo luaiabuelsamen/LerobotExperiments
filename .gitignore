@@ -20,6 +20,7 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
+lerobot/
 
 # PyInstaller
 *.manifest
@@ -38,7 +39,6 @@ coverage.xml
 .pytest_cache/
 
 venv/
-assets/
 models/
 
 # Data and models (large files)

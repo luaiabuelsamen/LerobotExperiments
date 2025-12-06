@@ -12,9 +12,11 @@ import gymnasium as gym
 # Try to import dataset recorder, set flag if available
 try:
     from .lerobot_dataset import LeRobotDatasetRecorder, create_dataset_recorder
+    from . import lerobot_dataset
     HAS_DATASET_RECORDER = True
 except ImportError:
     HAS_DATASET_RECORDER = False
+    lerobot_dataset = None
     print("Warning: lerobot_dataset.py not found. Dataset recording disabled.")
     
 
@@ -36,6 +38,8 @@ class SoArm100Env(gym.Env):
         frame_skip: int = 10,
         render_mode: str | None = "human",
         camera_mode: str = "third_person",  # "third_person" or "first_person"
+        force_new_dataset: bool = False,
+        dataset_path: str | None = None,
     ) -> None:
         """Cria uma nova instância do ambiente.
 
@@ -55,6 +59,10 @@ class SoArm100Env(gym.Env):
         camera_mode
             ``"third_person"`` para vista externa padrão ou ``"first_person"``
             para vista em primeira pessoa do gripper.
+        dataset_path
+            Caminho explícito para salvar/continuar um dataset LeRobot. Quando
+            ``None``, o ambiente procura o conjunto mais recente em
+            ``./recordings`` (a menos que ``force_new_dataset`` esteja ativo).
         """
 
         super().__init__()
@@ -81,6 +89,8 @@ class SoArm100Env(gym.Env):
         self.frame_skip = int(frame_skip)
         self.render_mode = render_mode
         self.camera_mode = camera_mode
+        self.force_new_dataset = force_new_dataset
+        self.dataset_path_override = dataset_path
 
         if render_mode == "human":
             print("Keyboard controls:")
@@ -189,7 +199,7 @@ class SoArm100Env(gym.Env):
         """Initialize the LeRobot dataset recorder.
         
         Args:
-            dataset_path: Path to save the dataset. If None, auto-generates a name.
+            dataset_path: Path to save the dataset. If None, auto-generates or continues latest.
             task: Task description for this dataset.
             fps: Recording framerate.
             robot_type: Robot type identifier.
@@ -198,17 +208,49 @@ class SoArm100Env(gym.Env):
             print("Error: lerobot_dataset module not available")
             return False
         
-        if dataset_path is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            dataset_path = f"./recordings/dataset_{timestamp}"
-        
         try:
-            # Check if dataset exists
+            from pathlib import Path
+
+            if dataset_path is None:
+                dataset_path = self.dataset_path_override
+            
+            # Auto-generate dataset path if not provided
+            if dataset_path is None:
+                # Check for existing datasets to continue (unless force_new_dataset is True)
+                recordings_dir = Path("./recordings")
+                if not self.force_new_dataset and recordings_dir.exists():
+                    existing_datasets = sorted([d for d in recordings_dir.iterdir() 
+                                              if d.is_dir() and (d / "meta" / "info.json").exists()],
+                                             key=lambda x: x.stat().st_mtime)
+                    if existing_datasets:
+                        # Continue the most recent dataset
+                        dataset_path = str(existing_datasets[-1])
+                        print(f"\\n{'='*60}")
+                        print(f"CONTINUING EXISTING DATASET: {dataset_path}")
+                        print(f"{'='*60}\\n")
+                        self.dataset_recorder = LeRobotDatasetRecorder.load(dataset_path)
+                        self.dataset_task = task
+                        print(f"Loaded dataset with {self.dataset_recorder.current_episode_index} episodes")
+                        return True
+                
+                # No existing dataset or force_new_dataset, create new one
+                from datetime import datetime
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                dataset_path = f"./recordings/dataset_{timestamp}"
+                if self.force_new_dataset:
+                    print(f"\\n{'='*60}")
+                    print(f"CREATING NEW DATASET (--new flag): {dataset_path}")
+                    print(f"{'='*60}\\n")
+            
+            # Check if specific dataset path exists
             if os.path.exists(dataset_path):
-                print(f"Loading existing dataset: {dataset_path}")
+                print(f"\\n{'='*60}")
+                print(f"LOADING EXISTING DATASET: {dataset_path}")
+                print(f"{'='*60}\\n")
                 self.dataset_recorder = LeRobotDatasetRecorder.load(dataset_path)
+                print(f"Loaded dataset with {self.dataset_recorder.current_episode_index} episodes")
             else:
-                print(f"Creating new dataset: {dataset_path}")
+                print(f"\\nCreating new dataset: {dataset_path}\\n")
                 self.dataset_recorder = create_dataset_recorder(
                     root=dataset_path,
                     fps=fps,
@@ -230,15 +272,23 @@ class SoArm100Env(gym.Env):
     
     def start_dataset_recording(self, task: str = None):
         """Start recording an episode for the LeRobot dataset."""
+        # Stop any existing recording first
+        if self.dataset_recording:
+            print("Stopping previous recording before starting new one...")
+            self.save_dataset_episode()
+        
         if self.dataset_recorder is None:
             # Auto-initialize with defaults
-            if not self.init_dataset_recorder():
+            if not self.init_dataset_recorder(self.dataset_path_override):
                 return
         
         task = task or getattr(self, 'dataset_task', "Pick up the block")
         self.dataset_recorder.start_episode(task=task)
         self.dataset_recording = True
-        print(f"Dataset episode recording started: {task}")
+        episode_num = self.dataset_recorder.current_episode_index + 1
+        print(f"\n{'='*50}")
+        print(f"Episode {episode_num} recording started: {task}")
+        print(f"{'='*50}\n")
     
     def save_dataset_episode(self):
         """Save the current episode to the dataset."""
@@ -246,9 +296,21 @@ class SoArm100Env(gym.Env):
             print("No dataset recording in progress")
             return
         
-        episode_idx = self.dataset_recorder.save_episode()
-        self.dataset_recording = False
-        print(f"Dataset episode {episode_idx} saved")
+        try:
+            episode_idx = self.dataset_recorder.save_episode()
+            self.dataset_recording = False
+            if episode_idx >= 0:
+                total = self.dataset_recorder.current_episode_index
+                print(f"\n{'='*50}")
+                print(f"✓ Episode {episode_idx} saved successfully!")
+                print(f"Total episodes recorded: {total}")
+                print(f"{'='*50}\n")
+            else:
+                print("Warning: Episode not saved (was it empty?)")
+                self.dataset_recording = False
+        except Exception as e:
+            print(f"Error saving episode: {e}")
+            self.dataset_recording = False
     
     def finalize_dataset(self):
         """Finalize and close the dataset recorder."""
