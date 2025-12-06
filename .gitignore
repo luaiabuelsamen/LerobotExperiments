@@ -38,7 +38,7 @@ coverage.xml
 .pytest_cache/
 
 venv/
-models/
+outputs/
 
 # Data and models (large files)
 recordings/

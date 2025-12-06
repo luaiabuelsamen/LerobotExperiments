@@ -684,7 +684,12 @@ class LeRobotDatasetRecorder:
         info["total_episodes"] = self.current_episode_index
         info["total_frames"] = self.total_frames
         info["total_tasks"] = len(self.tasks)
-        info["splits"] = {"train": f"0:{self.current_episode_index}"}
+
+        if self.current_episode_index == 0:
+            split_spec = "0:0"
+        else:
+            split_spec = f"0:{self.current_episode_index - 1}"
+        info["splits"] = {"train": split_spec}
         write_json(info, self.root / INFO_PATH)
     
     def finalize(self):

@@ -40,6 +40,7 @@ class SoArm100Env(gym.Env):
         camera_mode: str = "third_person",  # "third_person" or "first_person"
         force_new_dataset: bool = False,
         dataset_path: str | None = None,
+        enable_viewer_hotkeys: bool = True,
     ) -> None:
         """Cria uma nova instância do ambiente.
 
@@ -63,6 +64,9 @@ class SoArm100Env(gym.Env):
             Caminho explícito para salvar/continuar um dataset LeRobot. Quando
             ``None``, o ambiente procura o conjunto mais recente em
             ``./recordings`` (a menos que ``force_new_dataset`` esteja ativo).
+        enable_viewer_hotkeys
+            Quando ``True`` registra callbacks de teclado no viewer do MuJoCo.
+            Desative para que apenas o terminal capture os comandos.
         """
 
         super().__init__()
@@ -91,8 +95,9 @@ class SoArm100Env(gym.Env):
         self.camera_mode = camera_mode
         self.force_new_dataset = force_new_dataset
         self.dataset_path_override = dataset_path
+        self.enable_viewer_hotkeys = enable_viewer_hotkeys
 
-        if render_mode == "human":
+        if render_mode == "human" and self.enable_viewer_hotkeys:
             print("Keyboard controls:")
             print("  R - Reset episode")
             print("  Z - Randomize block position")
@@ -568,10 +573,11 @@ class SoArm100Env(gym.Env):
 
                 # O *viewer passivo* não assume o contexto via ``with``; ele
                 # permanece vivo até que ``.close()`` seja chamado.
+                key_cb = self._keyboard_callback if self.enable_viewer_hotkeys else None
                 self._viewer = mj_viewer.launch_passive(
                     self.model, 
                     self.data,
-                    key_callback=self._keyboard_callback
+                    key_callback=key_cb
                 )
 
             # Mantém a janela sincronizada com a simulação.

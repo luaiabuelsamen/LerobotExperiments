@@ -371,6 +371,7 @@ def main():
             camera_mode="first_person",
             force_new_dataset=args.new,
             dataset_path=args.dataset_path,
+            enable_viewer_hotkeys=False,
         )
     except Exception as e:
         if "GLFW" in str(e) or "DISPLAY" in str(e):
@@ -380,6 +381,7 @@ def main():
                 camera_mode="first_person",
                 force_new_dataset=args.new,
                 dataset_path=args.dataset_path,
+                enable_viewer_hotkeys=False,
             )
         else:
             raise
