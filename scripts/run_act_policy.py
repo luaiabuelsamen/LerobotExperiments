@@ -13,6 +13,7 @@ import mujoco.viewer as viewer
 import numpy as np
 import torch
 from huggingface_hub.constants import SAFETENSORS_SINGLE_FILE
+from PIL import Image
 
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies.act.configuration_act import ACTConfig
@@ -93,7 +94,7 @@ class PolicyRunner:
             if (idx := mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_JOINT, name)) >= 0
         ]
         LOGGER.info("Found %d actuated joints", len(self.joint_indices))
-    
+
     def _resolve_pretrained_dir(self, path: Path) -> Path:
         if path.is_file():
             raise ValueError("Expected a directory path, got a file: %s" % path)
@@ -175,6 +176,40 @@ class PolicyRunner:
         tensor = torch.from_numpy(frame).permute(2, 0, 1).contiguous()
         return tensor
 
+    def _capture_rgb_frame(
+        self,
+        renderer: mujoco.Renderer,
+        camera_source: int | mujoco.MjvCamera | None,
+    ) -> np.ndarray:
+        renderer.update_scene(self.mj_data, camera=camera_source)
+        frame = renderer.render().copy()
+        if frame.dtype != np.uint8:
+            if frame.max() <= 1.0:
+                frame = np.clip(frame * 255.0, 0, 255).astype(np.uint8)
+            else:
+                frame = np.clip(frame, 0, 255).astype(np.uint8)
+        return frame
+
+    @staticmethod
+    def _save_gif(frames: list[np.ndarray], path: Path, fps: int, speed: float) -> None:
+        if not frames:
+            return
+        duration_ms = max(1, int(1000 / (fps * speed)))
+        images = [Image.fromarray(frame) for frame in frames]
+        images[0].save(
+            path,
+            save_all=True,
+            append_images=images[1:],
+            duration=duration_ms,
+            loop=0,
+        )
+        LOGGER.info(
+            "Saved GIF to %s (%d frames, %.2fx speed)",
+            path,
+            len(frames),
+            speed,
+        )
+
     def _build_policy_observation(self) -> dict[str, torch.Tensor]:
         obs = {
             "observation.state": torch.from_numpy(self.get_state()).float(),
@@ -200,7 +235,20 @@ class PolicyRunner:
             mujoco.mj_forward(self.mj_model, self.mj_data)
         self.policy.reset()
     
-    def run_episode(self, max_steps: int = 1000, render: bool = True, initial_position=None) -> None:
+    def run_episode(
+        self,
+        max_steps: int = 1000,
+        render: bool = True,
+        initial_position=None,
+        *,
+        record_gif_path: str | None = None,
+        record_fps: int = 30,
+        record_speed: float = 1.0,
+        record_camera_name: str | None = None,
+        record_from_viewer: bool = False,
+        record_width: int | None = None,
+        record_height: int | None = None,
+    ) -> None:
         """
         Run one episode with the policy.
         
@@ -214,6 +262,24 @@ class PolicyRunner:
             initial_position = [0.3, -1.6223897, 1.6252737, 1.521133, -1.5169878, -0.01448443]
         
         self.reset(initial_position)
+
+        record_renderer = None
+        record_frames: list[np.ndarray] = []
+        record_camera_id: int | None = None
+        if record_gif_path is not None:
+            if record_fps <= 0:
+                raise ValueError("record_fps must be positive")
+            if record_speed <= 0:
+                raise ValueError("record_speed must be positive")
+            width = record_width or self.image_width
+            height = record_height or self.image_height
+            record_renderer = mujoco.Renderer(self.mj_model, height, width)
+            if record_camera_name:
+                record_camera_id = self._resolve_camera(record_camera_name)
+            else:
+                record_camera_id = self.camera_id
+            if record_from_viewer and not render:
+                raise ValueError("record_from_viewer requires the viewer to be enabled")
 
         if render:
             with mujoco.viewer.launch_passive(self.mj_model, self.mj_data) as v:
@@ -229,6 +295,13 @@ class PolicyRunner:
                         print(f"Step {step}/{max_steps}")
                     v.sync()
                     time.sleep(1 / 60)
+                    if record_renderer is not None:
+                        camera_source: int | mujoco._structs.MjvCamera | None = (
+                            v.cam if record_from_viewer else record_camera_id
+                        )
+                        record_frames.append(
+                            self._capture_rgb_frame(record_renderer, camera_source)
+                        )
 
                 print(f"Episode finished after {step} steps")
         else:
@@ -238,6 +311,15 @@ class PolicyRunner:
                 mujoco.mj_step(self.mj_model, self.mj_data)
                 if step % 100 == 0:
                     print(f"Step {step}/{max_steps}")
+                if record_renderer is not None:
+                    record_frames.append(
+                        self._capture_rgb_frame(record_renderer, record_camera_id)
+                    )
+
+        if record_gif_path and record_frames:
+            output_path = Path(record_gif_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            self._save_gif(record_frames, output_path, record_fps, record_speed)
     
     def run_continuous(self) -> None:
         """Run policy continuously with interactive viewer."""
@@ -276,6 +358,37 @@ def main() -> None:
     parser.add_argument("--image-width", type=int, default=480, help="Offscreen render width")
     parser.add_argument("--image-height", type=int, default=480, help="Offscreen render height")
     parser.add_argument("--no-viewer", action="store_true", help="Disable the interactive viewer")
+    parser.add_argument("--record-gif", type=str, default=None, help="Path to save a rendered GIF")
+    parser.add_argument("--record-fps", type=int, default=30, help="Frame rate used for GIF rendering")
+    parser.add_argument(
+        "--record-speed",
+        type=float,
+        default=1.0,
+        help="Playback speed multiplier applied to the GIF (e.g., 2.0 for 2x)",
+    )
+    parser.add_argument(
+        "--record-camera-name",
+        type=str,
+        default=None,
+        help="Camera name to render for the GIF (defaults to policy camera)",
+    )
+    parser.add_argument(
+        "--record-viewer-angle",
+        action="store_true",
+        help="Capture frames using the interactive viewer angle each step",
+    )
+    parser.add_argument(
+        "--record-width",
+        type=int,
+        default=None,
+        help="Optional GIF width override (defaults to policy image width)",
+    )
+    parser.add_argument(
+        "--record-height",
+        type=int,
+        default=None,
+        help="Optional GIF height override (defaults to policy image height)",
+    )
 
     args = parser.parse_args()
 
@@ -296,7 +409,17 @@ def main() -> None:
     if args.continuous:
         runner.run_continuous()
     else:
-        runner.run_episode(max_steps=args.steps, render=not args.no_viewer)
+        runner.run_episode(
+            max_steps=args.steps,
+            render=not args.no_viewer,
+            record_gif_path=args.record_gif,
+            record_fps=args.record_fps,
+            record_speed=args.record_speed,
+            record_camera_name=args.record_camera_name,
+            record_from_viewer=args.record_viewer_angle,
+            record_width=args.record_width,
+            record_height=args.record_height,
+        )
 
 
 if __name__ == "__main__":
