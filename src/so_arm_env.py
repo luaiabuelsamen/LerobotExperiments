@@ -410,7 +410,15 @@ class SoArm100Env(gym.Env):
         # Reinicia qpos/qvel e também os comandos dos atuadores (ctrl).
         mujoco.mj_resetData(self.model, self.data)
 
-        self.data.qpos[:] = self._home_qpos
+        # Check if initial_position provided in options
+        if options is not None and 'initial_position' in options:
+            initial_pos = options['initial_position']
+            # Set joint positions from initial_position
+            for i in range(min(len(initial_pos), len(self._home_qpos))):
+                self.data.qpos[i] = initial_pos[i]
+        else:
+            self.data.qpos[:] = self._home_qpos
+        
         self.data.qvel[:] = 0.0
         self.data.ctrl[:] = self._home_ctrl
 
@@ -443,13 +451,14 @@ class SoArm100Env(gym.Env):
         # Check if task is complete
         terminated = self._check_success()
         truncated = False
+        block_in_box = self._is_block_in_box()
         info: dict[str, Any] = {
             'block_pos': self._get_block_pos(),
             'box_pos': self._get_box_pos(),
             'gripper_pos': self._get_gripper_pos(),
             'distance_to_block': self._get_distance_to_block(),
-            'block_in_box': self._is_block_in_box(),
-            'success': terminated
+            'block_in_box': block_in_box,
+            'success': block_in_box  # Report actual success even if not terminating
         }
 
         # Record data if recording is enabled
